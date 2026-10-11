@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "dgSpecHash": "rB75k/qOkZc=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\user\\source\\repos\\LectorGastosLambda\\LectorGastosLambda\\LectorGastosLambda.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\user\\.nuget\\packages\\amazon.lambda.apigatewayevents\\2.7.3\\amazon.lambda.apigatewayevents.2.7.3.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\amazon.lambda.core\\2.8.0\\amazon.lambda.core.2.8.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\amazon.lambda.serialization.systemtextjson\\2.4.4\\amazon.lambda.serialization.systemtextjson.2.4.4.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\awssdk.core\\4.0.4\\awssdk.core.4.0.4.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\awssdk.dynamodbv2\\4.0.18\\awssdk.dynamodbv2.4.0.18.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\bouncycastle.cryptography\\2.6.2\\bouncycastle.cryptography.2.6.2.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\mailkit\\4.16.0\\mailkit.4.16.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.extensions.dependencyinjection.abstractions\\8.0.0\\microsoft.extensions.dependencyinjection.abstractions.8.0.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\8.0.0\\microsoft.extensions.logging.abstractions.8.0.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.identitymodel.abstractions\\8.18.0\\microsoft.identitymodel.abstractions.8.18.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.identitymodel.jsonwebtokens\\8.18.0\\microsoft.identitymodel.jsonwebtokens.8.18.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.identitymodel.logging\\8.18.0\\microsoft.identitymodel.logging.8.18.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.identitymodel.tokens\\8.18.0\\microsoft.identitymodel.tokens.8.18.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\mimekit\\4.16.0\\mimekit.4.16.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\system.formats.asn1\\8.0.1\\system.formats.asn1.8.0.1.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\system.identitymodel.tokens.jwt\\8.18.0\\system.identitymodel.tokens.jwt.8.18.0.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\system.security.cryptography.pkcs\\8.0.1\\system.security.cryptography.pkcs.8.0.1.nupkg.sha512",
+    "C:\\Users\\user\\.nuget\\packages\\microsoft.netcore.app.crossgen2.win-x64\\8.0.29\\microsoft.netcore.app.crossgen2.win-x64.8.0.29.nupkg.sha512"
+  ],
+  "logs": []
+}
