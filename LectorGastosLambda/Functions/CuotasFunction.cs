@@ -5,6 +5,7 @@ using Amazon.Lambda.APIGatewayEvents;
 using Amazon.Lambda.Core;
 using LectorGastosLambda.DTOs.Requests;
 using LectorGastosLambda.Models.DataBase;
+using LectorGastosLambda.Security;
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
@@ -22,11 +23,18 @@ namespace LectorGastosLambda.Functions
             var httpMethod = apiRequest.RequestContext.Http.Method.ToUpper();
             context.Logger.LogLine($"Recibida petición {httpMethod} en Cuotas");
 
+            if (httpMethod == "OPTIONS") return JwtAuth.RespuestaPreflight();
+
+            // El usuario sale del token, nunca de la URL ni del cuerpo
+            var userId = JwtAuth.ObtenerUserId(apiRequest, context.Logger);
+            if (userId == null)
+                return CrearRespuesta(401, new { Success = false, Message = "No autorizado. Inicia sesión de nuevo." });
+
             try
             {
-                if (httpMethod == "POST") return await ConvertirACuotas(apiRequest, context);
-                if (httpMethod == "GET") return await ListarCuotas(apiRequest, context);
-                if (httpMethod == "PUT") return await ActualizarCuota(apiRequest, context);
+                if (httpMethod == "POST") return await ConvertirACuotas(apiRequest, userId, context);
+                if (httpMethod == "GET") return await ListarCuotas(userId, context);
+                if (httpMethod == "PUT") return await ActualizarCuota(apiRequest, userId, context);
 
                 return CrearRespuesta(405, new { Success = false, Message = $"Método {httpMethod} no permitido." });
             }
@@ -38,13 +46,8 @@ namespace LectorGastosLambda.Functions
         }
 
         // --- 1. LISTAR CUOTAS (GET) ---
-        private async Task<APIGatewayHttpApiV2ProxyResponse> ListarCuotas(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
+        private async Task<APIGatewayHttpApiV2ProxyResponse> ListarCuotas(string userId, ILambdaContext context)
         {
-            apiRequest.QueryStringParameters.TryGetValue("userId", out string userId);
-
-            if (string.IsNullOrEmpty(userId))
-                return CrearRespuesta(400, new { Success = false, Message = "Falta el userId." });
-
             // Buscamos en la tabla de Gastos todos los que sean "EsPagoDeCuota"
             var config = new DynamoDBOperationConfig
             {
@@ -66,15 +69,17 @@ namespace LectorGastosLambda.Functions
         }
 
         // --- 2. EDITAR O PAGAR CUOTA (PUT) ---
-        private async Task<APIGatewayHttpApiV2ProxyResponse> ActualizarCuota(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
+        private async Task<APIGatewayHttpApiV2ProxyResponse> ActualizarCuota(APIGatewayHttpApiV2ProxyRequest apiRequest, string userId, ILambdaContext context)
         {
             if (string.IsNullOrEmpty(apiRequest.Body))
                 return CrearRespuesta(400, new { Success = false, Message = "El cuerpo está vacío." });
 
             var peticion = JsonSerializer.Deserialize<EditarCuotaRequest>(apiRequest.Body);
+            if (peticion == null || string.IsNullOrEmpty(peticion.FechaOperacion))
+                return CrearRespuesta(400, new { Success = false, Message = "FechaOperacion es obligatoria." });
 
             // DynamoDB necesita el PartitionKey (UserId) y el SortKey (FechaOperacion) para encontrar el registro
-            var gastoCuota = await _dbContext.LoadAsync<Gasto>(peticion.UserId, peticion.FechaOperacion);
+            var gastoCuota = await _dbContext.LoadAsync<Gasto>(userId, peticion.FechaOperacion);
 
             if (gastoCuota == null)
                 return CrearRespuesta(404, new { Success = false, Message = "Cuota no encontrada." });
@@ -94,11 +99,18 @@ namespace LectorGastosLambda.Functions
         }
 
         // --- 3. CONVERTIR A CUOTAS (POST - Tu código original intacto) ---
-        private async Task<APIGatewayHttpApiV2ProxyResponse> ConvertirACuotas(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
+        private async Task<APIGatewayHttpApiV2ProxyResponse> ConvertirACuotas(APIGatewayHttpApiV2ProxyRequest apiRequest, string userId, ILambdaContext context)
         {
-            // ... (AQUÍ VA TU CÓDIGO EXACTO DE ConvertirACuotas QUE ME PASASTE, NO LE CAMBIÉ NADA) ...
+            if (string.IsNullOrEmpty(apiRequest.Body))
+                return CrearRespuesta(400, new { Success = false, Message = "El cuerpo está vacío." });
+
             var peticion = JsonSerializer.Deserialize<ConvertirACuotasRequest>(apiRequest.Body);
-            var gastoOriginal = await _dbContext.LoadAsync<Gasto>(peticion.UserId, peticion.FechaOperacionOriginal);
+            if (peticion == null || peticion.CantidadCuotas <= 0 || string.IsNullOrEmpty(peticion.FechaOperacionOriginal))
+                return CrearRespuesta(400, new { Success = false, Message = "FechaOperacionOriginal y CantidadCuotas (> 0) son obligatorios." });
+
+            var gastoOriginal = await _dbContext.LoadAsync<Gasto>(userId, peticion.FechaOperacionOriginal);
+            if (gastoOriginal == null)
+                return CrearRespuesta(404, new { Success = false, Message = "Gasto no encontrado." });
 
             var nuevaCuotaId = Guid.NewGuid().ToString();
 

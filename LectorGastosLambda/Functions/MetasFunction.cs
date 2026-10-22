@@ -4,6 +4,7 @@ using Amazon.Lambda.APIGatewayEvents;
 using Amazon.Lambda.Core;
 using LectorGastosLambda.DTOs.Requests;
 using LectorGastosLambda.Models.DataBase;
+using LectorGastosLambda.Security;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -25,24 +26,27 @@ namespace LectorGastosLambda.Functions
 
             context.Logger.LogLine($"Recibida petición {httpMethod} en la ruta {path}");
 
+            if (httpMethod == "OPTIONS") return JwtAuth.RespuestaPreflight();
+
+            // El usuario sale del token, nunca de la URL ni del cuerpo
+            var userId = JwtAuth.ObtenerUserId(apiRequest, context.Logger);
+            if (userId == null)
+                return CrearRespuesta(401, new { Success = false, Message = "No autorizado. Inicia sesión de nuevo." });
+
             try
             {
                 switch (httpMethod)
                 {
                     case "GET":
-                        if (apiRequest.QueryStringParameters != null && apiRequest.QueryStringParameters.TryGetValue("userId", out string userId))
-                        {
-                            return await ObtenerMetas(userId, context);
-                        }
-                        return CrearRespuesta(400, new { Success = false, Message = "El parámetro userId es obligatorio." });
+                        return await ObtenerMetas(userId, context);
 
                     case "POST":
                     case "PUT":
                         if (path.EndsWith("/aportar"))
                         {
-                            return await AportarAMeta(apiRequest, context);
+                            return await AportarAMeta(apiRequest, userId, context);
                         }
-                        return await CrearMeta(apiRequest, context);
+                        return await CrearMeta(apiRequest, userId, context);
 
                     default:
                         return CrearRespuesta(405, new { Success = false, Message = $"Método {httpMethod} no permitido." });
@@ -68,8 +72,11 @@ namespace LectorGastosLambda.Functions
             }
         }
 
-        private async Task<APIGatewayHttpApiV2ProxyResponse> CrearMeta(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
+        private async Task<APIGatewayHttpApiV2ProxyResponse> CrearMeta(APIGatewayHttpApiV2ProxyRequest apiRequest, string userId, ILambdaContext context)
         {
+            if (string.IsNullOrEmpty(apiRequest.Body))
+                return CrearRespuesta(400, new { Success = false, Message = "El cuerpo está vacío." });
+
             var peticion = JsonSerializer.Deserialize<CrearMetaRequest>(apiRequest.Body);
 
             if (peticion == null || peticion.MontoObjetivo <= 0 || string.IsNullOrEmpty(peticion.Nombre))
@@ -79,7 +86,7 @@ namespace LectorGastosLambda.Functions
 
             var nuevaMeta = new Meta
             {
-                UsuarioID = peticion.UserId,
+                UsuarioID = userId,
                 MetaId = Guid.NewGuid().ToString(),
                 Nombre = peticion.Nombre,
                 Categoria = string.IsNullOrEmpty(peticion.Categoria) ? "General" : peticion.Categoria,
@@ -96,8 +103,11 @@ namespace LectorGastosLambda.Functions
             return CrearRespuesta(201, new { Success = true, Message = "Meta creada", MetaId = nuevaMeta.MetaId });
         }
 
-        private async Task<APIGatewayHttpApiV2ProxyResponse> AportarAMeta(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
+        private async Task<APIGatewayHttpApiV2ProxyResponse> AportarAMeta(APIGatewayHttpApiV2ProxyRequest apiRequest, string userId, ILambdaContext context)
         {
+            if (string.IsNullOrEmpty(apiRequest.Body))
+                return CrearRespuesta(400, new { Success = false, Message = "El cuerpo está vacío." });
+
             var peticion = JsonSerializer.Deserialize<AporteMetaRequest>(apiRequest.Body);
 
             if (peticion == null || peticion.MontoAporte <= 0)
@@ -105,7 +115,7 @@ namespace LectorGastosLambda.Functions
                 return CrearRespuesta(400, new { Success = false, Message = "El monto de aporte debe ser mayor a 0." });
             }
 
-            var meta = await _dbContext.LoadAsync<Meta>(peticion.UserId, peticion.MetaId);
+            var meta = await _dbContext.LoadAsync<Meta>(userId, peticion.MetaId);
             if (meta == null)
             {
                 return CrearRespuesta(404, new { Success = false, Message = "Meta no encontrada." });
@@ -120,7 +130,7 @@ namespace LectorGastosLambda.Functions
 
             var nuevoGasto = new Gasto
             {
-                UsuarioID = peticion.UserId,
+                UsuarioID = userId,
                 GastoId = Guid.NewGuid().ToString(),
                 FechaOperacion = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss"),
                 Monto = peticion.MontoAporte,

@@ -13,6 +13,7 @@ using System.Collections.Generic;
 using LectorGastosLambda.Models.DataBase;
 using LectorGastosLambda.DTOs.Responses;
 using LectorGastosLambda.DTOs.Requests;
+using LectorGastosLambda.Security;
 
 namespace LectorGastosLambda.Functions
 {
@@ -21,13 +22,18 @@ namespace LectorGastosLambda.Functions
         private static readonly AmazonDynamoDBClient _dynamoClient = new AmazonDynamoDBClient(Amazon.RegionEndpoint.USEast2);
         private static readonly DynamoDBContext _dbContext = new DynamoDBContext(_dynamoClient);
 
-        // La clave secreta para firmar el JWT.
-        private readonly string _jwtSecret = Environment.GetEnvironmentVariable("JWT_SECRET") ?? "UnaClaveSuperSecretaYMuyLargaParaGastosHogar2026!";
-
         public async Task<APIGatewayHttpApiV2ProxyResponse> LoginHandler(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
         {
             try
             {
+                // La clave para firmar el JWT viene de la variable de entorno JWT_SECRET
+                var clave = JwtAuth.ObtenerClave();
+                if (clave == null)
+                {
+                    context.Logger.LogError("JWT_SECRET no está configurado (o tiene menos de 32 caracteres). No se puede iniciar sesión.");
+                    return CrearRespuesta(500, new LoginResponse { Success = false, Message = "Error interno del servidor." });
+                }
+
                 // 1. Validar que la petición tenga un cuerpo (Body)
                 if (string.IsNullOrEmpty(apiRequest.Body))
                 {
@@ -56,7 +62,7 @@ namespace LectorGastosLambda.Functions
                 {
                     context.Logger.LogLine("Login exitoso. Generando Token...");
 
-                    var tokenString = GenerarTokenJWT(usuario);
+                    var tokenString = GenerarTokenJWT(usuario, clave);
 
                     return CrearRespuesta(200, new LoginResponse
                     {
@@ -77,9 +83,8 @@ namespace LectorGastosLambda.Functions
             }
         }
 
-        private string GenerarTokenJWT(UsuarioConfig usuario)
+        private string GenerarTokenJWT(UsuarioConfig usuario, SymmetricSecurityKey securityKey)
         {
-            var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtSecret));
             var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
             var claims = new[]
@@ -90,8 +95,8 @@ namespace LectorGastosLambda.Functions
             };
 
             var token = new JwtSecurityToken(
-                issuer: "gastos-hogar-api",
-                audience: "gastos-hogar-app",
+                issuer: JwtAuth.Issuer,
+                audience: JwtAuth.Audience,
                 claims: claims,
                 expires: DateTime.UtcNow.AddDays(7),
                 signingCredentials: credentials);

@@ -5,6 +5,7 @@ using Amazon.Lambda.APIGatewayEvents;
 using Amazon.Lambda.Core;
 using LectorGastosLambda.DTOs.Requests;
 using LectorGastosLambda.Models.DataBase;
+using LectorGastosLambda.Security;
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
@@ -23,14 +24,21 @@ namespace LectorGastosLambda.Functions
 
             context.Logger.LogLine($"Recibida petición {httpMethod} en la ruta de Gastos");
 
+            if (httpMethod == "OPTIONS") return JwtAuth.RespuestaPreflight();
+
+            // El usuario sale del token, nunca de la URL ni del cuerpo
+            var userId = JwtAuth.ObtenerUserId(apiRequest, context.Logger);
+            if (userId == null)
+                return CrearRespuesta(401, new { Success = false, Message = "No autorizado. Inicia sesión de nuevo." });
+
             try
             {
                 switch (httpMethod)
                 {
                     case "POST":
-                        return await CrearGasto(apiRequest, context);
+                        return await CrearGasto(apiRequest, userId, context);
                     case "GET":
-                        return await ObtenerGastos(apiRequest, context);
+                        return await ObtenerGastos(apiRequest, userId, context);
                     default:
                         return CrearRespuesta(405, new { Success = false, Message = $"Método {httpMethod} no permitido." });
                 }
@@ -42,7 +50,7 @@ namespace LectorGastosLambda.Functions
             }
         }
 
-        private async Task<APIGatewayHttpApiV2ProxyResponse> CrearGasto(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
+        private async Task<APIGatewayHttpApiV2ProxyResponse> CrearGasto(APIGatewayHttpApiV2ProxyRequest apiRequest, string userId, ILambdaContext context)
         {
             if (string.IsNullOrEmpty(apiRequest.Body))
             {
@@ -73,7 +81,7 @@ namespace LectorGastosLambda.Functions
 
             var nuevoGasto = new Gasto
             {
-                UsuarioID = peticion.UserId,
+                UsuarioID = userId,
                 FechaOperacion = string.IsNullOrEmpty(peticion.Fecha) ? DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss") : peticion.Fecha,
                 GastoId = Guid.NewGuid().ToString(),
                 Categoria = peticion.Categoria,
@@ -93,14 +101,14 @@ namespace LectorGastosLambda.Functions
             return CrearRespuesta(201, new { Success = true, Message = "Gasto registrado", GastoId = nuevoGasto.GastoId });
         }
 
-        private async Task<APIGatewayHttpApiV2ProxyResponse> ObtenerGastos(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
+        private async Task<APIGatewayHttpApiV2ProxyResponse> ObtenerGastos(APIGatewayHttpApiV2ProxyRequest apiRequest, string userId, ILambdaContext context)
         {
-            apiRequest.QueryStringParameters.TryGetValue("userId", out string userId);
-            apiRequest.QueryStringParameters.TryGetValue("mes", out string mes); // Ejemplo: "2026-08"
+            string? mes = null; // Ejemplo: "2026-08"
+            apiRequest.QueryStringParameters?.TryGetValue("mes", out mes);
 
-            if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(mes))
+            if (string.IsNullOrEmpty(mes))
             {
-                return CrearRespuesta(400, new { Success = false, Message = "Los parámetros 'userId' y 'mes' son obligatorios." });
+                return CrearRespuesta(400, new { Success = false, Message = "El parámetro 'mes' es obligatorio." });
             }
 
             try

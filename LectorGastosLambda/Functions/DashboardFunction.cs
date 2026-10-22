@@ -4,6 +4,7 @@ using Amazon.DynamoDBv2.DocumentModel;
 using Amazon.Lambda.APIGatewayEvents;
 using Amazon.Lambda.Core;
 using LectorGastosLambda.Models.DataBase;
+using LectorGastosLambda.Security;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -20,18 +21,24 @@ namespace LectorGastosLambda.Functions
         public async Task<APIGatewayHttpApiV2ProxyResponse> DashboardHandler(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
         {
             var httpMethod = apiRequest.RequestContext.Http.Method.ToUpper();
+            if (httpMethod == "OPTIONS") return JwtAuth.RespuestaPreflight();
             if (httpMethod != "GET")
             {
                 return CrearRespuesta(405, new { Success = false, Message = "Método no permitido. Solo GET." });
             }
 
+            // El usuario sale del token, nunca de la URL
+            var userId = JwtAuth.ObtenerUserId(apiRequest, context.Logger);
+            if (userId == null)
+                return CrearRespuesta(401, new { Success = false, Message = "No autorizado. Inicia sesión de nuevo." });
+
             try
             {
-                apiRequest.QueryStringParameters.TryGetValue("userId", out string userId);
-                apiRequest.QueryStringParameters.TryGetValue("mes", out string mes); // Formato esperado: "2026-05"
+                string? mes = null; // Formato esperado: "2026-05"
+                apiRequest.QueryStringParameters?.TryGetValue("mes", out mes);
 
-                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(mes))
-                    return CrearRespuesta(400, new { Success = false, Message = "Los parámetros 'userId' y 'mes' son obligatorios." });
+                if (string.IsNullOrEmpty(mes))
+                    return CrearRespuesta(400, new { Success = false, Message = "El parámetro 'mes' es obligatorio." });
 
                 context.Logger.LogLine($"Calculando Dashboard para usuario {userId} en {mes}");
 
