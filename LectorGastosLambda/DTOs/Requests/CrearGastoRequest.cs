@@ -18,6 +18,8 @@ namespace LectorGastosLambda.DTOs.Requests
         public string CuotaIdRelacionada { get; set; }
         public string Moneda { get; set; }
         public decimal? TipoCambio { get; set; }
+        public string? Origen { get; set; } // "Manual" (por defecto) o "Texto" (registro rápido)
+        public string? Compartido { get; set; } // "auto", "si" o "no"
         
         
     }

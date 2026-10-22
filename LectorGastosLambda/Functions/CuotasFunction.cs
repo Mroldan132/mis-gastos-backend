@@ -127,16 +127,22 @@ namespace LectorGastosLambda.Functions
                     GastoId = Guid.NewGuid().ToString(),
                     Monto = montoMensual,
                     Moneda = gastoOriginal.Moneda,
+                    TipoCambio = gastoOriginal.TipoCambio,
+                    MontoPEN = Math.Round(montoMensual * (gastoOriginal.TipoCambio ?? 1m), 2),
                     Comercio = $"{gastoOriginal.Comercio} (Cuota {i}/{peticion.CantidadCuotas})",
                     Categoria = gastoOriginal.Categoria,
                     Banco = gastoOriginal.Banco,
                     EsPagoDeCuota = true,
                     CuotaIdRelacionada = nuevaCuotaId,
-                    EsGastoReferencia = false
+                    EsGastoReferencia = false,
+                    Origen = gastoOriginal.Origen,
+                    Revisado = true,
+                    EsCompartido = gastoOriginal.EsCompartido
                 };
                 tareasGuardado.Add(_dbContext.SaveAsync(gastoHijo));
             }
             gastoOriginal.EsGastoReferencia = true;
+            gastoOriginal.Revisado = true; // Fraccionarlo implica que el usuario ya lo revisó
             tareasGuardado.Add(_dbContext.SaveAsync(gastoOriginal));
             await Task.WhenAll(tareasGuardado);
 

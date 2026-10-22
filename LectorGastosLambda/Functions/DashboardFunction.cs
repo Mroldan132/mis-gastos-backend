@@ -5,6 +5,7 @@ using Amazon.Lambda.APIGatewayEvents;
 using Amazon.Lambda.Core;
 using LectorGastosLambda.Models.DataBase;
 using LectorGastosLambda.Security;
+using LectorGastosLambda.Services;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -37,62 +38,66 @@ namespace LectorGastosLambda.Functions
                 string? mes = null; // Formato esperado: "2026-05"
                 apiRequest.QueryStringParameters?.TryGetValue("mes", out mes);
 
-                if (string.IsNullOrEmpty(mes))
+                if (!ReglasGastos.EsMesValido(mes))
                     return CrearRespuesta(400, new { Success = false, Message = "El parámetro 'mes' es obligatorio." });
 
                 context.Logger.LogLine($"Calculando Dashboard para usuario {userId} en {mes}");
 
-                // 1. Configuración de búsquedas (El truco está aquí)
-
-                // Para INGRESOS: Filtramos directamente en DynamoDB porque no tienen la complejidad de las cuotas.
-                var configIngresos = new DynamoDBOperationConfig
-                {
-                    QueryFilter = new List<ScanCondition>
-            {
-                new ScanCondition("FechaOperacion", ScanOperator.BeginsWith, mes)
-            }
-                };
-
-                // Para GASTOS: Traemos todos (sin filtro) para poder procesar la lógica de fechas en memoria.
-                var configGastos = new DynamoDBOperationConfig();
-
-                // 2. Disparamos las dos búsquedas AL MISMO TIEMPO
-                var busquedaIngresos = _dbContext.QueryAsync<Ingreso>(userId, configIngresos).GetRemainingAsync();
-                var busquedaGastos = _dbContext.QueryAsync<Gasto>(userId, configGastos).GetRemainingAsync();
-
-                // Esperamos a que ambas terminen
+                // 1. Traemos todos los ingresos y gastos del usuario AL MISMO TIEMPO (se filtran en memoria
+                //    porque las cuotas cuentan en el mes en que se pagan y hace falta el historial para la tendencia)
+                var busquedaIngresos = _dbContext.QueryAsync<Ingreso>(userId, new QueryConfig()).GetRemainingAsync();
+                var busquedaGastos = _dbContext.QueryAsync<Gasto>(userId, new QueryConfig()).GetRemainingAsync();
                 await Task.WhenAll(busquedaIngresos, busquedaGastos);
 
-                var listaIngresos = busquedaIngresos.Result;
+                var todosLosIngresos = busquedaIngresos.Result;
                 var listaGastosTotales = busquedaGastos.Result;
 
-                // 3. Procesamos los gastos en memoria (LINQ)
-                var gastosDelMes = listaGastosTotales.Where(g =>
-                    !g.EsGastoReferencia &&
-                    (
-                        // Gastos normales del mes
-                        (!g.EsPagoDeCuota && !string.IsNullOrEmpty(g.FechaOperacion) && g.FechaOperacion.StartsWith(mes))
-                        ||
-                        // Cuotas pagadas en este mes
-                        (g.EsPagoDeCuota && g.Estado == "Pagado" && !string.IsNullOrEmpty(g.FechaActualizacion) && g.FechaActualizacion.StartsWith(mes))
-                    )
-                ).ToList();
+                decimal IngresosDe(string m) => todosLosIngresos.Where(i => (i.FechaOperacion ?? "").StartsWith(m)).Sum(i => i.Monto);
+                List<Gasto> GastosDe(string m) => listaGastosTotales.Where(g => ReglasGastos.CuentaEnMes(g, m)).ToList();
 
-                // 4. Cálculos finales
-                decimal totalIngresos = listaIngresos.Sum(i => i.Monto);
-
-                // Ahora usamos "gastosDelMes" en lugar de la lista total, así evitamos sumar cuotas no pagadas
-                decimal totalGastos = gastosDelMes.Sum(g => g.MontoPEN > 0 ? g.MontoPEN : g.Monto);
-
+                // 2. Mes solicitado (normales del mes + cuotas pagadas en el mes, sin los gastos fraccionados)
+                var gastosDelMes = GastosDe(mes);
+                decimal totalIngresos = IngresosDe(mes);
+                decimal totalGastos = gastosDelMes.Sum(ReglasGastos.MontoEnSoles);
                 decimal balanceFinal = totalIngresos - totalGastos;
 
                 var gastosPorCategoria = gastosDelMes
                     .GroupBy(g => g.Categoria)
-                    .Select(g => new {
-                        Categoria = g.Key,
-                        Total = g.Sum(x => x.MontoPEN > 0 ? x.MontoPEN : x.Monto)
-                    })
+                    .Select(g => new { Categoria = g.Key, Total = g.Sum(ReglasGastos.MontoEnSoles) })
                     .OrderByDescending(g => g.Total)
+                    .ToList();
+
+                // 3. Comparativa por categoría contra el mes anterior
+                var mesAnterior = ReglasGastos.MesAnterior(mes);
+                var anteriorPorCategoria = ReglasGastos.TotalesPorCategoria(GastosDe(mesAnterior));
+                var comparativa = gastosPorCategoria
+                    .Select(c => c.Categoria ?? "Otros")
+                    .Union(anteriorPorCategoria.Keys)
+                    .Where(c => c != ReglasGastos.CategoriaAhorro)
+                    .Select(c =>
+                    {
+                        var actual = gastosPorCategoria.FirstOrDefault(x => x.Categoria == c)?.Total ?? 0;
+                        var anterior = anteriorPorCategoria.GetValueOrDefault(c);
+                        return new
+                        {
+                            Categoria = c,
+                            Actual = actual,
+                            Anterior = anterior,
+                            Variacion = anterior > 0 ? Math.Round((actual - anterior) / anterior * 100, 1) : (decimal?)null
+                        };
+                    })
+                    .OrderByDescending(c => c.Actual)
+                    .ToList();
+
+                // 4. Tendencia de los últimos 6 meses (incluido el solicitado)
+                var tendencia = Enumerable.Range(0, 6).Reverse()
+                    .Select(i => ReglasGastos.MesAnterior(mes, i))
+                    .Select(m =>
+                    {
+                        var gastos = GastosDe(m);
+                        var ahorro = gastos.Where(ReglasGastos.EsAhorro).Sum(ReglasGastos.MontoEnSoles);
+                        return new { Mes = m, Ingresos = IngresosDe(m), Gastos = gastos.Sum(ReglasGastos.MontoEnSoles) - ahorro, Ahorro = ahorro };
+                    })
                     .ToList();
 
                 // 5. Devolvemos el reporte completo
@@ -106,7 +111,16 @@ namespace LectorGastosLambda.Functions
                         Gastos = totalGastos,
                         Balance = balanceFinal
                     },
-                    DesgloseCategorias = gastosPorCategoria
+                    DesgloseCategorias = gastosPorCategoria,
+                    Comparativa = new
+                    {
+                        MesAnterior = mesAnterior,
+                        GastosMesAnterior = GastosDe(mesAnterior).Where(g => !ReglasGastos.EsAhorro(g)).Sum(ReglasGastos.MontoEnSoles),
+                        Categorias = comparativa
+                    },
+                    Tendencia = tendencia,
+                    // Gastos leídos por la IA que el usuario todavía no confirmó o corrigió
+                    PorRevisar = listaGastosTotales.Count(g => g.Origen == "Correo" && !g.Revisado)
                 });
             }
             catch (Exception ex)

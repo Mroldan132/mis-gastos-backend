@@ -19,7 +19,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 using LectorGastosLambda.Models.DataBase;
-using LectorGastosLambda.DTOs.Responses;
+using LectorGastosLambda.Services;
 
 [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
 namespace LectorGastosLambda.Functions
@@ -28,11 +28,9 @@ namespace LectorGastosLambda.Functions
     {
         private static readonly AmazonDynamoDBClient dynamoClient = new AmazonDynamoDBClient(Amazon.RegionEndpoint.USEast2);
         private static readonly DynamoDBContext dbContext = new DynamoDBContext(dynamoClient);
-        private static readonly HttpClient httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
         // Máximo de llamadas simultáneas a Gemini, para no chocar con el límite de peticiones (429)
         private static readonly SemaphoreSlim limiteGemini = new SemaphoreSlim(3);
-        private const int MaxReintentos = 3;
 
         // Se activa cuando Gemini pide esperar más de un minuto (cuota diaria agotada): no tiene sentido seguir llamando
         private static volatile bool cuotaAgotada;
@@ -40,8 +38,8 @@ namespace LectorGastosLambda.Functions
 
         public async Task<string> FunctionHandler(object input, ILambdaContext context)
         {
-            var geminiApiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
-            var geminiModel = Environment.GetEnvironmentVariable("GEMINI_MODEL") ?? "gemini-flash-latest";
+            var geminiApiKey = GeminiClient.ApiKey;
+            var geminiModel = GeminiClient.Modelo;
 
             if (string.IsNullOrWhiteSpace(geminiApiKey))
             {
@@ -202,13 +200,19 @@ namespace LectorGastosLambda.Functions
             {
                 if (cuotaAgotada) return null;
 
-                var jsonGasto = await LlamarGeminiAsync(textoLimpio, apiKey, model, logger);
-                if (jsonGasto == null) return null;
+                var resultado = await GeminiClient.ExtraerGastoAsync("Extrae los datos de este ticket de gasto:", textoLimpio, apiKey, model, logger);
+                if (resultado.CuotaAgotada)
+                {
+                    cuotaAgotada = true;
+                    logger.LogWarning("Cuota de Gemini agotada; los correos restantes quedan como no leídos para la próxima ejecución.");
+                    return null;
+                }
+                if (resultado.Json == null) return null;
 
-                var record = JsonSerializer.Deserialize<Gasto>(jsonGasto);
+                var record = JsonSerializer.Deserialize<Gasto>(resultado.Json);
                 if (record == null)
                 {
-                    logger.LogWarning($"Gemini devolvió un JSON vacío: {jsonGasto}");
+                    logger.LogWarning($"Gemini devolvió un JSON vacío: {resultado.Json}");
                     return null;
                 }
 
@@ -225,37 +229,11 @@ namespace LectorGastosLambda.Functions
                 record.GastoId = Guid.NewGuid().ToString();
                 record.EsPagoDeCuota = false;
                 record.CuotaIdRelacionada = "";
+                record.Origen = "Correo";
+                record.Revisado = false; // El usuario lo confirma o corrige desde la app
 
-                // ====================================================
-                // LÓGICA MULTIMONEDA: CONGELAR TIPO DE CAMBIO
-                // ====================================================
-                if (string.Equals(record.Moneda, "USD", StringComparison.OrdinalIgnoreCase))
-                {
-                    record.Moneda = "USD";
-                    try
-                    {
-                        var responseTc = await httpClient.GetStringAsync("https://open.er-api.com/v6/latest/USD");
-                        using var document = JsonDocument.Parse(responseTc);
-                        var rate = document.RootElement.GetProperty("rates").GetProperty("PEN").GetDecimal();
-
-                        record.TipoCambio = rate;
-                        record.MontoPEN = Math.Round(record.Monto * rate, 2);
-                        logger.LogLine($"Gasto en USD detectado. TC aplicado: {rate}. MontoPEN: {record.MontoPEN}");
-                    }
-                    catch (Exception ex)
-                    {
-                        // Si la API de moneda cae, usamos un TC seguro de respaldo
-                        logger.LogWarning($"Error obteniendo TC en vivo, usando respaldo. Error: {ex.Message}");
-                        record.TipoCambio = 3.75m;
-                        record.MontoPEN = Math.Round(record.Monto * 3.75m, 2);
-                    }
-                }
-                else
-                {
-                    record.Moneda = "PEN";
-                    record.TipoCambio = 1m;
-                    record.MontoPEN = record.Monto;
-                }
+                // Congela el tipo de cambio del día para los gastos en dólares
+                await Monedas.NormalizarAsync(record, logger);
 
                 return record;
             }
@@ -269,82 +247,6 @@ namespace LectorGastosLambda.Functions
                 limiteGemini.Release();
             }
         }
-
-        // Devuelve el JSON del gasto o null. Reintenta con espera creciente ante 429 (cuota) y 5xx (Gemini caído).
-        private async Task<string?> LlamarGeminiAsync(string textoLimpio, string apiKey, string model, ILambdaLogger logger)
-        {
-            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent";
-
-            var requestBody = new
-            {
-                contents = new[] { new { parts = new[] { new { text = "Extrae los datos de este ticket de gasto: " + textoLimpio } } } },
-                generationConfig = new
-                {
-                    temperature = 0.0,
-                    responseMimeType = "application/json",
-                    responseSchema = new
-                    {
-                        type = "OBJECT",
-                        properties = new
-                        {
-                            Banco = new { type = "STRING" },
-                            Monto = new { type = "NUMBER" },
-                            Moneda = new { type = "STRING", description = "PEN o USD" },
-                            FechaOperacion = new { type = "STRING", description = "YYYY-MM-DD" },
-                            Comercio = new { type = "STRING" },
-                            Categoria = new { type = "STRING" }
-                        },
-                        required = new[] { "Banco", "Monto", "Moneda", "FechaOperacion", "Comercio", "Categoria" }
-                    }
-                }
-            };
-            var cuerpo = JsonSerializer.Serialize(requestBody);
-
-            for (int intento = 1; intento <= MaxReintentos; intento++)
-            {
-                using var request = new HttpRequestMessage(HttpMethod.Post, url);
-                request.Content = new StringContent(cuerpo, Encoding.UTF8, "application/json");
-                request.Headers.Add("x-goog-api-key", apiKey);
-
-                using var response = await httpClient.SendAsync(request);
-                var resString = await response.Content.ReadAsStringAsync();
-
-                if (response.IsSuccessStatusCode)
-                {
-                    var aiData = JsonSerializer.Deserialize<GeminiResponse>(resString);
-                    var texto = aiData?.candidates?.FirstOrDefault()?.content?.parts?.FirstOrDefault()?.text;
-                    if (string.IsNullOrWhiteSpace(texto))
-                    {
-                        logger.LogWarning($"Gemini respondió sin contenido: {Recortar(resString)}");
-                        return null;
-                    }
-                    return texto;
-                }
-
-                var reintentable = response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500;
-                logger.LogError($"Gemini respondió {(int)response.StatusCode} (intento {intento}/{MaxReintentos}): {Recortar(resString)}");
-
-                if (response.StatusCode == HttpStatusCode.TooManyRequests && SegundosDeEspera(resString) > 60)
-                {
-                    cuotaAgotada = true;
-                    logger.LogWarning("Cuota de Gemini agotada; los correos restantes quedan como no leídos para la próxima ejecución.");
-                    return null;
-                }
-
-                if (!reintentable || intento == MaxReintentos) return null;
-                await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, intento)));
-            }
-            return null;
-        }
-
-        // Lee el "retryDelay": "20000s" que Gemini incluye en sus errores 429
-        private static double SegundosDeEspera(string respuesta)
-        {
-            var match = Regex.Match(respuesta, @"""retryDelay""\s*:\s*""(\d+(?:\.\d+)?)s""");
-            return match.Success ? double.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture) : 0;
-        }
-
-        private static string Recortar(string texto) => texto.Length > 500 ? texto.Substring(0, 500) + "..." : texto;
 
         private string LimpiarContenido(string? html)
         {

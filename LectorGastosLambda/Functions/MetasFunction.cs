@@ -140,7 +140,9 @@ namespace LectorGastosLambda.Functions
                 Categoria = "Ahorro",
                 Comercio = $"Aporte a Meta: {meta.Nombre}",
                 Banco = "Transferencia Interna",
-                EsPagoDeCuota = false
+                EsPagoDeCuota = false,
+                Origen = "Manual",
+                Revisado = true
             };
 
             await _dbContext.SaveAsync(nuevoGasto);
