@@ -37,6 +37,7 @@ namespace LectorGastosLambda.Functions
             catch (JsonException) { /* Evento de EventBridge: se usan las opciones por defecto */ }
 
             var usuarios = await _dbContext.ScanAsync<UsuarioConfig>(new List<ScanCondition>()).GetRemainingAsync();
+            var hogar = await CargarContextoHogar(usuarios, context.Logger);
             int enviados = 0;
 
             foreach (var usuario in usuarios.Where(u => !string.IsNullOrEmpty(u.UserId) && !string.IsNullOrEmpty(u.Email)))
@@ -45,7 +46,7 @@ namespace LectorGastosLambda.Functions
 
                 try
                 {
-                    var (asunto, html) = await ArmarResumen(usuario, context.Logger);
+                    var (asunto, html) = await ArmarResumen(usuario, hogar);
 
                     if (opciones.DryRun)
                     {
@@ -70,7 +71,29 @@ namespace LectorGastosLambda.Functions
             return opciones.DryRun ? "Prueba completada (sin envíos)." : $"Resúmenes enviados: {enviados}.";
         }
 
-        private static async Task<(string Asunto, string Html)> ArmarResumen(UsuarioConfig usuario, ILambdaLogger logger)
+        // Metas activas del hogar y cómo se reparten entre los miembros (es igual para todos, se carga una sola vez)
+        private sealed record ContextoHogar(List<Meta> MetasActivas, Dictionary<string, decimal> Proporciones);
+
+        private static async Task<ContextoHogar> CargarContextoHogar(List<UsuarioConfig> usuarios, ILambdaLogger logger)
+        {
+            try
+            {
+                var config = await Hogar.CargarConfig(_dbContext);
+                var miembros = await Hogar.CargarMiembros(_dbContext, usuarios, ReglasGastos.MesActualLima(), conIngresos: config.ModoReparto == "ingresos");
+                var metas = await _dbContext.QueryAsync<Meta>(Meta.DuenoHogar, new QueryConfig()).GetRemainingAsync();
+                return new ContextoHogar(
+                    metas.Where(m => m.Estado == Meta.EstadoActiva).OrderBy(m => m.FechaCreacion).Take(4).ToList(),
+                    Hogar.Proporciones(config, miembros));
+            }
+            catch (Exception ex)
+            {
+                // Si falla, el resumen sale igual pero sin la sección de metas del hogar
+                logger.LogError($"No se pudieron cargar las metas del hogar: {ex.Message}");
+                return new ContextoHogar(new List<Meta>(), new Dictionary<string, decimal>());
+            }
+        }
+
+        private static async Task<(string Asunto, string Html)> ArmarResumen(UsuarioConfig usuario, ContextoHogar hogar)
         {
             var hoy = ReglasGastos.AhoraLima().Date;
             var inicioSemana = hoy.AddDays(-6);         // Los últimos 7 días, incluido hoy
@@ -126,11 +149,20 @@ namespace LectorGastosLambda.Functions
 
             var porRevisar = gastos.Count(g => g.Origen == "Correo" && !g.Revisado);
 
+            // Metas del hogar: avance total y cuánto le falta a esta persona para cubrir su parte
+            var miProporcion = hogar.Proporciones.GetValueOrDefault(usuario.UserId);
+            var metasHogar = hogar.MetasActivas.Select(m =>
+            {
+                var miAporte = m.Aportes?.GetValueOrDefault(usuario.UserId) ?? 0;
+                var miParte = Math.Round(m.MontoObjetivo * miProporcion, 2);
+                return (Nombre: $"{m.Icono} {m.Nombre}".Trim(), Actual: m.MontoActual, Objetivo: m.MontoObjetivo, MeFalta: Math.Max(0, miParte - miAporte));
+            }).ToList();
+
             var variacion = totalAnterior > 0 ? (totalSemana - totalAnterior) / totalAnterior * 100 : (decimal?)null;
             var asunto = $"Tu semana: {Monto(totalSemana)} en gastos" +
                          (variacion.HasValue ? $" ({(variacion >= 0 ? "+" : "")}{variacion:0}% vs. la anterior)" : "");
 
-            var html = Plantilla(usuario.Nombre, inicioSemana, hoy, totalSemana, variacion, porCategoria, mayorAlza, alertas, vencimientos, porRevisar, semana.Count);
+            var html = Plantilla(usuario.Nombre, inicioSemana, hoy, totalSemana, variacion, porCategoria, mayorAlza, alertas, vencimientos, metasHogar, porRevisar, semana.Count);
             return (asunto, html);
         }
 
@@ -158,7 +190,8 @@ namespace LectorGastosLambda.Functions
         private static string Plantilla(string? nombre, DateTime desde, DateTime hasta, decimal total, decimal? variacion,
             List<KeyValuePair<string, decimal>> categorias, (string Categoria, decimal Diferencia) mayorAlza,
             List<(string Categoria, decimal Monto, decimal Gastado)> alertas,
-            List<(DateTime Fecha, string Nombre, decimal Monto, string Moneda)> vencimientos, int porRevisar, int cantidad)
+            List<(DateTime Fecha, string Nombre, decimal Monto, string Moneda)> vencimientos,
+            List<(string Nombre, decimal Actual, decimal Objetivo, decimal MeFalta)> metasHogar, int porRevisar, int cantidad)
         {
             const string tinta = "#F4F4F5", suave = "#A1A1AA", tenue = "#71717A", borde = "#26262B", superficie = "#141417", acento = "#D4F75A";
             var sb = new StringBuilder();
@@ -213,6 +246,19 @@ namespace LectorGastosLambda.Functions
                 {
                     var pct = a.Gastado / a.Monto * 100;
                     sb.Append(Fila($"{E(a.Categoria)} <span style=\"color:{tenue}\">· {Monto(a.Gastado)} de {Monto(a.Monto)}</span>", $"{pct:0}%", pct >= 100 ? "#FB7185" : "#FBBF24"));
+                }
+                sb.Append("</table>");
+            }
+
+            if (metasHogar.Count > 0)
+            {
+                sb.Append(Seccion("Metas del hogar"));
+                sb.Append("<table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">");
+                foreach (var m in metasHogar)
+                {
+                    var pct = m.Objetivo > 0 ? Math.Min(m.Actual / m.Objetivo, 1) * 100 : 0;
+                    var detalle = m.MeFalta > 0 ? $"te faltan {Monto(m.MeFalta)} de tu parte" : "tu parte está completa";
+                    sb.Append(Fila($"{E(m.Nombre)} <span style=\"color:{tenue}\">· {Monto(m.Actual)} de {Monto(m.Objetivo)} · {detalle}</span>", $"{pct:0}%", pct >= 100 ? "#34D399" : acento));
                 }
                 sb.Append("</table>");
             }

@@ -1,9 +1,3 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
 namespace LectorGastosLambda.DTOs.Requests
 {
     public class CrearMetaRequest
@@ -13,5 +7,7 @@ namespace LectorGastosLambda.DTOs.Requests
         public string Categoria { get; set; }
         public decimal MontoObjetivo { get; set; }
         public string Icono { get; set; }
+        // true: la meta es de todo el hogar y cualquier miembro puede aportar
+        public bool Compartida { get; set; }
     }
 }

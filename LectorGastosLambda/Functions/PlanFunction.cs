@@ -1,6 +1,5 @@
 using Amazon.DynamoDBv2;
 using Amazon.DynamoDBv2.DataModel;
-using Amazon.DynamoDBv2.DocumentModel;
 using Amazon.Lambda.APIGatewayEvents;
 using Amazon.Lambda.Core;
 using LectorGastosLambda.DTOs.Requests;
@@ -277,36 +276,26 @@ namespace LectorGastosLambda.Functions
         // HOGAR COMPARTIDO
         // ====================================================
 
-        private static async Task<ConfiguracionHogar> CargarConfig() =>
-            await _dbContext.LoadAsync<ConfiguracionHogar>(ConfiguracionHogar.IdPrincipal) ?? new ConfiguracionHogar();
-
         private async Task<APIGatewayHttpApiV2ProxyResponse> ObtenerHogar(APIGatewayHttpApiV2ProxyRequest req, string userId)
         {
             var mes = MesSolicitado(req);
-            var configTask = CargarConfig();
-            var usuariosTask = _dbContext.ScanAsync<UsuarioConfig>(new List<ScanCondition>()).GetRemainingAsync();
+            var configTask = Hogar.CargarConfig(_dbContext);
+            var usuariosTask = Hogar.CargarUsuarios(_dbContext);
             await Task.WhenAll(configTask, usuariosTask);
             var config = configTask.Result;
-
-            var miembros = usuariosTask.Result
-                .Where(u => !string.IsNullOrEmpty(u.UserId))
-                .OrderBy(u => u.UserId)
-                .ToList();
+            var miembros = usuariosTask.Result;
 
             // Gastos e ingresos del mes de cada miembro, en paralelo
             var datos = await Task.WhenAll(miembros.Select(async m =>
             {
                 var gastos = (await GastosDe(m.UserId)).Where(g => ReglasGastos.CuentaEnMes(g, mes) && !ReglasGastos.EsAhorro(g)).ToList();
-                var ingresos = await _dbContext.QueryAsync<Ingreso>(m.UserId, new QueryConfig
-                {
-                    QueryFilter = new List<ScanCondition> { new ScanCondition("FechaOperacion", ScanOperator.BeginsWith, mes) }
-                }).GetRemainingAsync();
-                return (Miembro: m, Gastos: gastos, Ingresos: ingresos.Sum(i => i.Monto));
+                var ingresos = await Hogar.IngresosDelMes(_dbContext, m.UserId, mes);
+                return (Miembro: m, Gastos: gastos, Ingresos: ingresos);
             }));
 
             var compartidosPorMiembro = datos.ToDictionary(d => d.Miembro.UserId, d => d.Gastos.Where(g => ReglasGastos.EsCompartido(g, config)).ToList());
             var totalCompartido = compartidosPorMiembro.Values.Sum(l => l.Sum(ReglasGastos.MontoEnSoles));
-            var proporciones = CalcularProporciones(config, datos.Select(d => (d.Miembro.UserId, d.Ingresos)).ToList());
+            var proporciones = Hogar.Proporciones(config, datos.Select(d => new MiembroHogar(d.Miembro.UserId, d.Miembro.Nombre, d.Ingresos)).ToList());
 
             var resumenMiembros = datos.Select(d =>
             {
@@ -375,32 +364,12 @@ namespace LectorGastosLambda.Functions
             });
         }
 
-        // Proporción (0 a 1) que le toca a cada miembro según el modo de reparto
-        private static Dictionary<string, decimal> CalcularProporciones(ConfiguracionHogar config, List<(string UserId, decimal Ingresos)> miembros)
-        {
-            var iguales = miembros.ToDictionary(m => m.UserId, _ => miembros.Count > 0 ? 1m / miembros.Count : 0m);
-
-            if (config.ModoReparto == "ingresos")
-            {
-                var total = miembros.Sum(m => m.Ingresos);
-                return total > 0 ? miembros.ToDictionary(m => m.UserId, m => m.Ingresos / total) : iguales;
-            }
-
-            if (config.ModoReparto == "fijo" && config.Porcentajes != null)
-            {
-                var suma = miembros.Sum(m => config.Porcentajes.GetValueOrDefault(m.UserId));
-                if (suma > 0) return miembros.ToDictionary(m => m.UserId, m => config.Porcentajes.GetValueOrDefault(m.UserId) / suma);
-            }
-
-            return iguales;
-        }
-
         private async Task<APIGatewayHttpApiV2ProxyResponse> GuardarHogar(APIGatewayHttpApiV2ProxyRequest req)
         {
             var p = Leer<ConfigHogarRequest>(req);
             if (p == null) return Respuestas.Error(400, "El cuerpo de la petición está vacío.");
 
-            var config = await CargarConfig();
+            var config = await Hogar.CargarConfig(_dbContext);
 
             if (p.CategoriasCompartidas != null)
                 config.CategoriasCompartidas = p.CategoriasCompartidas.Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c.Trim()).Distinct().ToList();
