@@ -38,7 +38,7 @@ namespace LectorGastosLambda.Functions
             try
             {
                 if (httpMethod == "POST" && path.EndsWith("/gastos/texto"))
-                    return await InterpretarTexto(apiRequest, context);
+                    return await InterpretarTexto(apiRequest, userId, context);
 
                 switch (httpMethod)
                 {
@@ -202,6 +202,8 @@ namespace LectorGastosLambda.Functions
             if (gasto == null)
                 return CrearRespuesta(404, new { Success = false, Message = "Gasto no encontrado." });
 
+            var (revisadoAntes, categoriaAntes, comercioAntes) = (gasto.Revisado, gasto.Categoria, gasto.Comercio);
+
             var cambiaMonto = peticion.Monto.HasValue || !string.IsNullOrEmpty(peticion.Moneda) || peticion.TipoCambio.HasValue;
             if (cambiaMonto && (gasto.EsGastoReferencia || gasto.EsPagoDeCuota))
                 return CrearRespuesta(409, new { Success = false, Message = "El monto de un gasto fraccionado o de una cuota se ajusta desde Cuotas." });
@@ -239,7 +241,18 @@ namespace LectorGastosLambda.Functions
             // Cualquier corrección cuenta como revisión, salvo que se pida explícitamente lo contrario
             gasto.Revisado = peticion.Revisado ?? true;
 
+            // Si el usuario corrige la categoría o el nombre, deja de contar como confirmado automáticamente
+            if (gasto.Categoria != categoriaAntes || gasto.Comercio != comercioAntes) gasto.AutoConfirmado = false;
+
             await _dbContext.SaveAsync(gasto);
+
+            // La app aprende de los gastos leídos por la IA: cuando el usuario los confirma o les corrige categoría o nombre
+            var esRevision = gasto.Revisado && (!revisadoAntes || gasto.Categoria != categoriaAntes || gasto.Comercio != comercioAntes);
+            if (gasto.Origen == "Correo" && esRevision && !gasto.EsGastoReferencia && !gasto.EsPagoDeCuota)
+            {
+                try { await Aprendizaje.RegistrarAsync(_dbContext, gasto); }
+                catch (Exception ex) { context.Logger.LogError($"No se pudo registrar lo aprendido de {gasto.Comercio}: {ex.Message}"); }
+            }
             context.Logger.LogLine($"Gasto {gasto.GastoId} actualizado.");
             return CrearRespuesta(200, new { Success = true, Message = "Gasto actualizado", Gasto = gasto });
         }
@@ -265,7 +278,7 @@ namespace LectorGastosLambda.Functions
         }
 
         // --- REGISTRO RÁPIDO: "almuerzo 25 yape" -> gasto sugerido (no se guarda hasta que el usuario confirme) ---
-        private async Task<APIGatewayHttpApiV2ProxyResponse> InterpretarTexto(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
+        private async Task<APIGatewayHttpApiV2ProxyResponse> InterpretarTexto(APIGatewayHttpApiV2ProxyRequest apiRequest, string userId, ILambdaContext context)
         {
             var peticion = string.IsNullOrEmpty(apiRequest.Body) ? null : JsonSerializer.Deserialize<TextoGastoRequest>(apiRequest.Body);
             var texto = peticion?.Texto?.Trim();
@@ -300,6 +313,14 @@ namespace LectorGastosLambda.Functions
             if (!DateTime.TryParseExact(sugerido.FechaOperacion, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
                 sugerido.FechaOperacion = hoy;
             sugerido.Moneda = sugerido.Moneda?.ToUpper() == "USD" ? "USD" : "PEN";
+
+            // Si el usuario ya corrigió este comercio antes, se sugiere como lo dejó
+            var regla = await Aprendizaje.BuscarAsync(_dbContext, userId, sugerido.Comercio);
+            if (regla != null)
+            {
+                sugerido.Categoria = regla.Categoria;
+                if (!string.IsNullOrWhiteSpace(regla.NombreComercio)) sugerido.Comercio = regla.NombreComercio;
+            }
 
             return CrearRespuesta(200, new
             {

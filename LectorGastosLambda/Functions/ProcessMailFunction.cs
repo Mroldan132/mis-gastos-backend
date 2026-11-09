@@ -267,6 +267,11 @@ namespace LectorGastosLambda.Functions
                 record.CuotaIdRelacionada = "";
                 record.Origen = "Correo";
                 record.Revisado = false; // El usuario lo confirma o corrige desde la app
+                record.ComercioOriginal = record.Comercio;
+
+                // Lo aprendido de revisiones anteriores: nombre y categoría del comercio, y si ya se confirma solo
+                if (await Aprendizaje.AplicarAsync(dbContext, record))
+                    logger.LogLine($"'{record.Comercio}' se confirmó solo (ya confirmado {Aprendizaje.ConfirmacionesParaAutoConfirmar}+ veces).");
 
                 // Congela el tipo de cambio del día para los gastos en dólares
                 await Monedas.NormalizarAsync(record, logger);

@@ -36,5 +36,10 @@ namespace LectorGastosLambda.Models.DataBase
         public bool Revisado { get; set; }
         // null = se decide por las categorías compartidas del hogar; true/false = elegido a mano
         public bool? EsCompartido { get; set; }
+
+        // Nombre del comercio tal como lo leyó la IA (el usuario puede renombrarlo); es la llave de lo aprendido
+        public string? ComercioOriginal { get; set; }
+        // Se confirmó solo porque el usuario ya había confirmado este comercio varias veces
+        public bool AutoConfirmado { get; set; }
     }
 }
