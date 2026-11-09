@@ -1,4 +1,5 @@
 ﻿using Amazon.DynamoDBv2.DataModel;
+using LectorGastosLambda.Services;
 
 namespace LectorGastosLambda.Models.DataBase
 {
@@ -16,7 +17,9 @@ namespace LectorGastosLambda.Models.DataBase
         public decimal? TipoCambio { get; set; }
         public decimal MontoPEN { get; set; }
         public string Comercio { get; set; }
-        public string Categoria { get; set; }
+        // Siempre una categoría del catálogo: lo que llega de la IA, de la app o de registros antiguos se normaliza aquí
+        private string _categoria = Categorias.Otros;
+        public string Categoria { get => _categoria; set => _categoria = Categorias.Normalizar(value); }
         public string Banco { get; set; }
 
         public string GastoId { get; set; }

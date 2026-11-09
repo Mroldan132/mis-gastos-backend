@@ -52,10 +52,8 @@ namespace LectorGastosLambda.Functions
             try
             {
                 context.Logger.LogLine("Consultando tabla de usuarios...");
-
-                var scanResponse = await dynamoClient.ScanAsync(new ScanRequest { TableName = "ConfiguracionUsuarios" });
-
-                if (scanResponse.Items.Count == 0)
+                var usuarios = await dbContext.ScanAsync<UsuarioConfig>(new List<ScanCondition>()).GetRemainingAsync();
+                if (usuarios.Count == 0)
                 {
                     context.Logger.LogLine("No se encontraron usuarios en la tabla ConfiguracionUsuarios.");
                     return "Sin usuarios";
@@ -63,34 +61,53 @@ namespace LectorGastosLambda.Functions
 
                 int totalGuardados = 0, totalFallidos = 0;
 
-                foreach (var item in scanResponse.Items)
+                // 1. Buzón dedicado: todos los usuarios le reenvían sus notificaciones
+                if (Buzon.Configurado)
                 {
-                    if (!item.ContainsKey("Email") || !item.ContainsKey("AppPassword"))
-                    {
-                        context.Logger.LogWarning("Usuario sin Email o AppPassword en ConfiguracionUsuarios, se omite.");
-                        continue;
-                    }
-
-                    var userEmail = item["Email"].S;
-                    var userPass = item["AppPassword"].S;
-                    var userNombre = item.ContainsKey("Nombre") ? item["Nombre"].S : userEmail;
-                    var userId = item.ContainsKey("UserId") ? item["UserId"].S : userEmail;
-
-                    context.Logger.LogLine($"--- Procesando cuenta: {userNombre} ({userEmail}) ---");
-
+                    context.Logger.LogLine($"--- Procesando buzón {Buzon.Email} ---");
                     try
                     {
-                        var (guardados, fallidos) = await ProcesarCuentaAsync(userEmail, userPass, userNombre, userId, geminiApiKey, geminiModel, context.Logger);
+                        var (guardados, fallidos) = await ProcesarCuentaAsync(Buzon.Email!, Buzon.Password!, "INBOX", "buzón",
+                            m => Buzon.IdentificarUsuario(m, usuarios)?.UserId, geminiApiKey, geminiModel, context.Logger);
                         totalGuardados += guardados;
                         totalFallidos += fallidos;
                     }
                     catch (AuthenticationException ex)
                     {
-                        context.Logger.LogError($"Gmail rechazó el login de {userEmail} (¿contraseña de aplicación revocada?): {ex.Message}");
+                        context.Logger.LogError($"Gmail rechazó el login del buzón {Buzon.Email} (¿contraseña de aplicación revocada?): {ex.Message}");
                     }
                     catch (Exception ex)
                     {
-                        context.Logger.LogError($"Error procesando cuenta {userEmail}: {ex}");
+                        context.Logger.LogError($"Error procesando el buzón {Buzon.Email}: {ex}");
+                    }
+                }
+                else
+                {
+                    context.Logger.LogWarning("BUZON_EMAIL / BUZON_APP_PASSWORD no configurados: solo se leen las cuentas personales.");
+                }
+
+                // 2. Sistema anterior: cuentas personales con contraseña de aplicación y etiqueta GastosApp.
+                //    Al borrar el AppPassword de un usuario en la tabla, deja de leerse su correo personal.
+                foreach (var usuario in usuarios.Where(u => !string.IsNullOrEmpty(u.Email) && !string.IsNullOrEmpty(u.AppPassword)))
+                {
+                    var userNombre = usuario.Nombre ?? usuario.Email;
+                    var userId = usuario.UserId ?? usuario.Email;
+                    context.Logger.LogLine($"--- Procesando cuenta personal: {userNombre} ({usuario.Email}) ---");
+
+                    try
+                    {
+                        var (guardados, fallidos) = await ProcesarCuentaAsync(usuario.Email, usuario.AppPassword, Carpeta, userNombre,
+                            _ => userId, geminiApiKey, geminiModel, context.Logger);
+                        totalGuardados += guardados;
+                        totalFallidos += fallidos;
+                    }
+                    catch (AuthenticationException ex)
+                    {
+                        context.Logger.LogError($"Gmail rechazó el login de {usuario.Email} (¿contraseña de aplicación revocada?): {ex.Message}");
+                    }
+                    catch (Exception ex)
+                    {
+                        context.Logger.LogError($"Error procesando cuenta {usuario.Email}: {ex}");
                     }
                 }
 
@@ -104,37 +121,52 @@ namespace LectorGastosLambda.Functions
             }
         }
 
-        private async Task<(int guardados, int fallidos)> ProcesarCuentaAsync(string userEmail, string userPass, string userNombre, string userId, string apiKey, string model, ILambdaLogger logger)
+        // Lee los correos no leídos de una carpeta. resolverUsuario dice a quién pertenece cada correo (null = de nadie conocido).
+        private async Task<(int guardados, int fallidos)> ProcesarCuentaAsync(string email, string password, string nombreCarpeta, string etiqueta,
+            Func<MimeMessage, string?> resolverUsuario, string apiKey, string model, ILambdaLogger logger)
         {
             using var client = new ImapClient();
             await client.ConnectAsync("imap.gmail.com", 993, true);
-            await client.AuthenticateAsync(userEmail, userPass);
+            await client.AuthenticateAsync(email, password);
 
             IMailFolder carpeta;
             try
             {
-                carpeta = await client.GetFolderAsync(Carpeta);
+                carpeta = nombreCarpeta == "INBOX" ? client.Inbox : await client.GetFolderAsync(nombreCarpeta);
             }
             catch (FolderNotFoundException)
             {
-                logger.LogWarning($"Etiqueta '{Carpeta}' no encontrada para {userNombre}");
+                logger.LogWarning($"Etiqueta '{nombreCarpeta}' no encontrada para {etiqueta}");
                 await client.DisconnectAsync(true);
                 return (0, 0);
             }
 
             await carpeta.OpenAsync(FolderAccess.ReadWrite);
             var uids = await carpeta.SearchAsync(SearchQuery.NotSeen);
-            logger.LogLine($"Correos nuevos para {userNombre}: {uids.Count}");
+            logger.LogLine($"Correos nuevos en {etiqueta}: {uids.Count}");
 
             // Una conexión IMAP no admite operaciones en paralelo: los correos se descargan en serie
-            var textos = new List<(UniqueId uid, string texto)>();
+            var textos = new List<(UniqueId uid, string userId, string texto)>();
             foreach (var uid in uids)
             {
                 var message = await carpeta.GetMessageAsync(uid);
-                textos.Add((uid, LimpiarContenido(message.HtmlBody ?? message.TextBody)));
+                if (Buzon.EsConfirmacionDeReenvio(message))
+                {
+                    logger.LogLine($"Correo {uid}: confirmación de reenvío de Gmail, se deja sin leer para copiar el código.");
+                    continue;
+                }
+
+                var userId = resolverUsuario(message);
+                if (userId == null)
+                {
+                    // Queda sin leer: si el usuario se registra después, se procesa en la siguiente ejecución
+                    logger.LogWarning($"Correo {uid} en {etiqueta} de '{message.From}' (asunto '{message.Subject}'): no se reconoce a qué usuario pertenece.");
+                    continue;
+                }
+                textos.Add((uid, userId, LimpiarContenido(message.HtmlBody ?? message.TextBody)));
             }
 
-            var tareasIA = textos.ToDictionary(t => t.uid, t => ProcesarTicketConIAAsync(t.texto, userId, apiKey, model, logger));
+            var tareasIA = textos.ToDictionary(t => t.uid, t => ProcesarTicketConIAAsync(t.texto, t.userId, apiKey, model, logger));
             await Task.WhenAll(tareasIA.Values);
 
             int guardados = 0, fallidos = 0;
@@ -147,7 +179,7 @@ namespace LectorGastosLambda.Functions
                 {
                     // Se deja como no leído para reintentarlo en la próxima ejecución
                     fallidos++;
-                    logger.LogWarning($"Correo {uid} de {userNombre} no se pudo procesar; queda como no leído.");
+                    logger.LogWarning($"Correo {uid} de {etiqueta} no se pudo procesar; queda como no leído.");
                     continue;
                 }
 
@@ -157,12 +189,12 @@ namespace LectorGastosLambda.Functions
                     await dbContext.SaveAsync(record);
                     await carpeta.AddFlagsAsync(uid, MessageFlags.Seen, true);
                     guardados++;
-                    logger.LogLine($"Gasto guardado: {record.Comercio} ({record.Moneda} {record.Monto}) para {userNombre}");
+                    logger.LogLine($"Gasto guardado: {record.Comercio} ({record.Moneda} {record.Monto}) para {record.UsuarioID} desde {etiqueta}");
                 }
                 catch (Exception ex)
                 {
                     fallidos++;
-                    logger.LogError($"Error guardando gasto del correo {uid} de {userNombre}: {ex.Message}");
+                    logger.LogError($"Error guardando gasto del correo {uid} de {etiqueta}: {ex.Message}");
                 }
             }
 
@@ -200,7 +232,11 @@ namespace LectorGastosLambda.Functions
             {
                 if (cuotaAgotada) return null;
 
-                var resultado = await GeminiClient.ExtraerGastoAsync("Extrae los datos de este ticket de gasto:", textoLimpio, apiKey, model, logger);
+                var instruccion =
+                    "Extrae los datos de este ticket de gasto de un banco peruano. " +
+                    "Categoria: exactamente una de esta lista, según el comercio y lo que se compró " +
+                    "(si el comercio no deja claro qué es, usa Otros):\n" + Categorias.ParaIA() + "\nTicket:";
+                var resultado = await GeminiClient.ExtraerGastoAsync(instruccion, textoLimpio, apiKey, model, logger);
                 if (resultado.CuotaAgotada)
                 {
                     cuotaAgotada = true;

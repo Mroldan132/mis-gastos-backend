@@ -46,7 +46,8 @@ namespace LectorGastosLambda.Services
                             Moneda = new { type = "STRING", description = "PEN o USD" },
                             FechaOperacion = new { type = "STRING", description = "YYYY-MM-DD" },
                             Comercio = new { type = "STRING" },
-                            Categoria = new { type = "STRING" }
+                            // La IA solo puede responder una categoría del catálogo
+                            Categoria = new { type = "STRING", format = "enum", @enum = Categorias.Nombres }
                         },
                         required = new[] { "Banco", "Monto", "Moneda", "FechaOperacion", "Comercio", "Categoria" }
                     }

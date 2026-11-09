@@ -60,7 +60,7 @@ namespace LectorGastosLambda.Functions
                 }
                 catch (AuthenticationException ex)
                 {
-                    context.Logger.LogError($"Gmail rechazó el envío de {usuario.Email} (¿contraseña de aplicación revocada?): {ex.Message}");
+                    context.Logger.LogError($"Gmail rechazó el envío a {usuario.Email} desde {(Buzon.Configurado ? Buzon.Email : usuario.Email)} (¿contraseña de aplicación revocada?): {ex.Message}");
                 }
                 catch (Exception ex)
                 {
@@ -123,7 +123,7 @@ namespace LectorGastosLambda.Functions
             // Presupuestos del mes al 80 % o más
             var gastadoMes = ReglasGastos.TotalesPorCategoria(gastos.Where(g => ReglasGastos.CuentaEnMes(g, mes)));
             var alertas = presupuestosTask.Result
-                .Select(p => (p.Categoria, p.Monto, Gastado: gastadoMes.GetValueOrDefault(p.Categoria)))
+                .Select(p => (p.Categoria, p.Monto, Gastado: gastadoMes.GetValueOrDefault(Categorias.Normalizar(p.Categoria))))
                 .Where(p => p.Monto > 0 && p.Gastado / p.Monto >= 0.8m)
                 .OrderByDescending(p => p.Gastado / p.Monto)
                 .ToList();
@@ -166,17 +166,22 @@ namespace LectorGastosLambda.Functions
             return (asunto, html);
         }
 
+        // Se envía desde el buzón de la app; si no está configurado, desde la cuenta del usuario (sistema anterior)
         private static async Task EnviarCorreo(UsuarioConfig usuario, string asunto, string html)
         {
+            var (remitente, clave) = Buzon.Configurado ? (Buzon.Email!, Buzon.Password!) : (usuario.Email, usuario.AppPassword);
+            if (string.IsNullOrEmpty(clave))
+                throw new InvalidOperationException("No hay buzón configurado (BUZON_EMAIL / BUZON_APP_PASSWORD) ni contraseña de aplicación del usuario.");
+
             var mensaje = new MimeMessage();
-            mensaje.From.Add(new MailboxAddress("HogarApp", usuario.Email));
+            mensaje.From.Add(new MailboxAddress("HogarApp", remitente));
             mensaje.To.Add(new MailboxAddress(usuario.Nombre ?? usuario.Email, usuario.Email));
             mensaje.Subject = asunto;
             mensaje.Body = new BodyBuilder { HtmlBody = html }.ToMessageBody();
 
             using var smtp = new SmtpClient();
             await smtp.ConnectAsync("smtp.gmail.com", 465, SecureSocketOptions.SslOnConnect);
-            await smtp.AuthenticateAsync(usuario.Email, usuario.AppPassword);
+            await smtp.AuthenticateAsync(remitente, clave);
             await smtp.SendAsync(mensaje);
             await smtp.DisconnectAsync(true);
         }

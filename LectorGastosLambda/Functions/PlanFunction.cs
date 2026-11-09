@@ -90,7 +90,7 @@ namespace LectorGastosLambda.Functions
             var items = presupuestosTask.Result
                 .Select(p =>
                 {
-                    var usado = gastado.GetValueOrDefault(p.Categoria);
+                    var usado = gastado.GetValueOrDefault(Categorias.Normalizar(p.Categoria));
                     return new
                     {
                         p.Categoria,
@@ -128,7 +128,7 @@ namespace LectorGastosLambda.Functions
 
             var nuevos = peticion.Presupuestos
                 .Where(p => !string.IsNullOrWhiteSpace(p.Categoria) && p.Monto > 0)
-                .GroupBy(p => p.Categoria.Trim())
+                .GroupBy(p => Categorias.Normalizar(p.Categoria))
                 .ToDictionary(g => g.Key, g => g.Last().Monto);
 
             var actuales = await _dbContext.QueryAsync<Presupuesto>(userId, new QueryConfig()).GetRemainingAsync();
@@ -215,7 +215,7 @@ namespace LectorGastosLambda.Functions
             if (!string.IsNullOrWhiteSpace(p.Nombre)) fijo.Nombre = p.Nombre.Trim();
             if (p.Monto is > 0) fijo.Monto = p.Monto.Value;
             if (!string.IsNullOrEmpty(p.Moneda)) fijo.Moneda = p.Moneda.ToUpper() == "USD" ? "USD" : "PEN";
-            if (!string.IsNullOrWhiteSpace(p.Categoria)) fijo.Categoria = p.Categoria.Trim();
+            if (!string.IsNullOrWhiteSpace(p.Categoria)) fijo.Categoria = Categorias.Normalizar(p.Categoria);
             if (p.DiaVencimiento is >= 1 and <= 31) fijo.DiaVencimiento = p.DiaVencimiento.Value;
             if (p.Activo.HasValue) fijo.Activo = p.Activo.Value;
 
@@ -353,8 +353,8 @@ namespace LectorGastosLambda.Functions
             {
                 Success = true,
                 Mes = mes,
-                Configuracion = new { config.CategoriasCompartidas, config.ModoReparto, config.Porcentajes },
-                // Categorías que usaron los miembros este mes (la IA crea categorías libres)
+                Configuracion = new { CategoriasCompartidas = (config.CategoriasCompartidas ?? new List<string>()).Select(Categorias.Normalizar).Distinct().ToList(), config.ModoReparto, config.Porcentajes },
+                // Categorías que usaron los miembros este mes
                 CategoriasDelMes = datos.SelectMany(d => d.Gastos).Select(g => g.Categoria).Where(c => !string.IsNullOrEmpty(c)).Distinct().OrderBy(c => c).ToList(),
                 TotalCompartido = totalCompartido,
                 Miembros = resumenMiembros,
@@ -372,7 +372,7 @@ namespace LectorGastosLambda.Functions
             var config = await Hogar.CargarConfig(_dbContext);
 
             if (p.CategoriasCompartidas != null)
-                config.CategoriasCompartidas = p.CategoriasCompartidas.Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c.Trim()).Distinct().ToList();
+                config.CategoriasCompartidas = p.CategoriasCompartidas.Where(c => !string.IsNullOrWhiteSpace(c)).Select(Categorias.Normalizar).Distinct().ToList();
 
             if (p.ModoReparto != null)
             {

@@ -36,7 +36,7 @@ namespace LectorGastosLambda.Services
         public static bool EsAhorro(Gasto g) => g.Categoria == CategoriaAhorro;
 
         public static bool EsCompartido(Gasto g, ConfiguracionHogar config) =>
-            g.EsCompartido ?? (config.CategoriasCompartidas?.Contains(g.Categoria ?? "") ?? false);
+            g.EsCompartido ?? (config.CategoriasCompartidas?.Any(c => Categorias.Normalizar(c) == g.Categoria) ?? false);
 
         public static string MesAnterior(string mes, int meses = 1)
         {

@@ -21,8 +21,6 @@ namespace LectorGastosLambda.Functions
         private static readonly AmazonDynamoDBClient _dynamoClient = new AmazonDynamoDBClient(Amazon.RegionEndpoint.USEast2);
         private static readonly DynamoDBContext _dbContext = new DynamoDBContext(_dynamoClient);
 
-        private static readonly string[] Categorias = { "Comida", "Transporte", "Servicios", "Hogar", "Entretenimiento", "Salud", "Tecnología", "Educación", "Ropa", "Otros" };
-
         public async Task<APIGatewayHttpApiV2ProxyResponse> GastosMasterHandler(APIGatewayHttpApiV2ProxyRequest apiRequest, ILambdaContext context)
         {
             var httpMethod = apiRequest.RequestContext.Http.Method.ToUpper();
@@ -83,6 +81,8 @@ namespace LectorGastosLambda.Functions
             {
                 return CrearRespuesta(400, new { Success = false, Message = "Monto y Categoría son obligatorios." });
             }
+            if (!Categorias.Existe(peticion.Categoria))
+                return CrearRespuesta(400, new { Success = false, Message = $"Categoría no válida. Elige una de: {string.Join(", ", Categorias.Nombres)}." });
 
             string monedaFinal = string.IsNullOrEmpty(peticion.Moneda) ? "PEN" : peticion.Moneda.ToUpper();
             decimal tipoCambioFinal = peticion.TipoCambio ?? 1m;
@@ -207,7 +207,13 @@ namespace LectorGastosLambda.Functions
                 return CrearRespuesta(409, new { Success = false, Message = "El monto de un gasto fraccionado o de una cuota se ajusta desde Cuotas." });
 
             if (!string.IsNullOrWhiteSpace(peticion.Comercio)) gasto.Comercio = peticion.Comercio.Trim();
-            if (!string.IsNullOrWhiteSpace(peticion.Categoria)) gasto.Categoria = peticion.Categoria.Trim();
+            if (!string.IsNullOrWhiteSpace(peticion.Categoria))
+            {
+                // Se acepta la categoría actual sin cambios (por ejemplo, Ahorro de una meta)
+                if (!Categorias.Existe(peticion.Categoria) && Categorias.Normalizar(peticion.Categoria) != gasto.Categoria)
+                    return CrearRespuesta(400, new { Success = false, Message = $"Categoría no válida. Elige una de: {string.Join(", ", Categorias.Nombres)}." });
+                gasto.Categoria = peticion.Categoria;
+            }
             if (peticion.Compartido != null) gasto.EsCompartido = CompartidoDesdeTexto(peticion.Compartido);
 
             if (cambiaMonto)
@@ -279,7 +285,7 @@ namespace LectorGastosLambda.Functions
                 $"Moneda PEN salvo que mencione dólares o $. Si no dice la fecha, usa hoy; entiende \"ayer\". " +
                 $"Banco: el medio de pago que mencione (Yape, Plin, efectivo, tarjeta, banco) o \"Efectivo/Otro\". " +
                 $"Comercio: un nombre corto y claro con mayúscula inicial. " +
-                $"Categoria: exactamente una de {string.Join(", ", Categorias)}. Frase:";
+                $"Categoria: exactamente una de esta lista, según lo que se compró:\n{Categorias.ParaIA()}\nFrase:";
 
             var resultado = await GeminiClient.ExtraerGastoAsync(instruccion, texto, apiKey, GeminiClient.Modelo, context.Logger);
             if (resultado.CuotaAgotada)
@@ -293,7 +299,6 @@ namespace LectorGastosLambda.Functions
 
             if (!DateTime.TryParseExact(sugerido.FechaOperacion, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
                 sugerido.FechaOperacion = hoy;
-            if (!Categorias.Contains(sugerido.Categoria)) sugerido.Categoria = "Otros";
             sugerido.Moneda = sugerido.Moneda?.ToUpper() == "USD" ? "USD" : "PEN";
 
             return CrearRespuesta(200, new
